@@ -1,0 +1,619 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Carina Demo – Module Dependency Graph</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="https://cdn.jsdelivr.net/npm/cytoscape@3.30.2/dist/cytoscape.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/dagre@0.8.5/dist/dagre.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/cytoscape-dagre@2.5.0/cytoscape-dagre.js"></script>
+<style>
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; font-family: -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; color: #1f2328; }
+  body { display: flex; flex-direction: column; }
+  header { padding: 8px 14px; border-bottom: 1px solid #d0d7de; display: flex; flex-wrap: wrap; gap: 14px; align-items: center; background: #f6f8fa; }
+  header h1 { font-size: 16px; margin: 0 8px 0 0; }
+  header label { font-size: 13px; display: inline-flex; align-items: center; gap: 4px; cursor: pointer; }
+  header input[type=search] { padding: 4px 8px; border: 1px solid #d0d7de; border-radius: 6px; width: 200px; }
+  header button { padding: 4px 10px; border: 1px solid #d0d7de; border-radius: 6px; background: #fff; cursor: pointer; }
+  .legend { display: flex; gap: 12px; font-size: 12px; align-items: center; flex-wrap: wrap; }
+  .legend .sw { display: inline-block; width: 12px; height: 12px; border-radius: 3px; border: 1px solid #0003; vertical-align: middle; margin-right: 3px; }
+  .legend .ln { display: inline-block; width: 26px; border-top: 2px solid #444; vertical-align: middle; margin-right: 3px; }
+  main { flex: 1; display: flex; min-height: 0; }
+  #cy { flex: 1; min-width: 0; background: #fff; }
+  #panel { width: 380px; border-left: 1px solid #d0d7de; overflow-y: auto; padding: 14px 16px; font-size: 13px; background: #fbfcfd; }
+  #panel h2 { font-size: 16px; margin: 0 0 4px; word-break: break-all; }
+  #panel h3 { font-size: 12px; text-transform: uppercase; letter-spacing: .04em; color: #57606a; margin: 16px 0 6px; }
+  #panel ul { margin: 0; padding-left: 18px; }
+  #panel li { margin: 3px 0; }
+  #panel .tag { display: inline-block; font-size: 11px; padding: 1px 6px; border-radius: 10px; color: #fff; margin-bottom: 8px; }
+  #panel .open { display: inline-block; margin-top: 6px; padding: 4px 10px; border-radius: 6px; background: #0969da; color: #fff; text-decoration: none; }
+  #panel .warn { background: #fff8c5; border: 1px solid #d4a72c66; padding: 6px 8px; border-radius: 6px; margin-top: 8px; }
+  #panel a { color: #0969da; }
+  #panel code { font-size: 12px; background: #eff1f3; padding: 0 3px; border-radius: 3px; }
+  .muted { color: #57606a; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Carina Demo · module graph</h1>
+  <input type="search" id="search" placeholder="Search modules / classes…">
+  <button id="fit">Fit</button>
+  <button id="reset">Reset</button>
+  <label><input type="checkbox" data-kind="calls" checked> calls</label>
+  <label><input type="checkbox" data-kind="runtime" checked> runtime</label>
+  <label><input type="checkbox" data-kind="reads" checked> reads</label>
+  <label><input type="checkbox" data-kind="launches" checked> launches</label>
+  <label><input type="checkbox" id="showResources" checked> resources</label>
+  <div class="legend" id="legend"></div>
+</header>
+<main>
+  <div id="cy"></div>
+  <aside id="panel"></aside>
+</main>
+
+<script>
+/* ============================================================================
+ * GRAPH DATA
+ * A "module" is a leaf Java package (main code), a feature group of test
+ * classes (top-level test package) or a regression sub-package, a group of
+ * resource files, or a build artefact. An edge source -> target means
+ * "source calls / uses target".
+ *
+ * REPO_BASE: links are REPO_BASE + "/" + path. ".." works when this file is
+ * opened from a local checkout (docs/ is one level below the repo root). For
+ * GitHub, use e.g. "https://github.com/zebrunner/carina-demo/tree/main".
+ * ==========================================================================*/
+const REPO_BASE = "..";
+
+const M = "src/main/java/com/zebrunner/carina/demo/";
+const T = "src/test/java/com/zebrunner/carina/demo/";
+const MR = "src/main/resources/";
+const TR = "src/test/resources/";
+
+const GROUPS = {
+  build:     { label: "Build & suites",   color: "#8250df" },
+  tests:     { label: "Test code",        color: "#cf222e" },
+  main:      { label: "Main code",        color: "#0969da" },
+  resources: { label: "Resources",        color: "#1a7f37" },
+};
+
+// Sub-colour per area inside the main group, so web / mobile / API / DB clusters stand out.
+const AREA_COLORS = {
+  web: "#ddf4ff", mobile: "#fbefff", api: "#fff8c5", db: "#ffebe9", infra: "#eaeef2",
+  test: "#ffebe9", res: "#dafbe1", build: "#fbefff",
+};
+
+const nodes = [
+  // ---------------------------------------------------------------- build
+  { id: "maven", group: "build", area: "build", label: "Maven build (pom.xml)",
+    desc: "Java 11, carina-core 1.3.0. Surefire runs testng_suites/${suite}.xml with the Zebrunner agent.",
+    dir: "", path: "pom.xml",
+    files: [["pom.xml", "dependencies (carina-core/api/dataprovider/aws-s3/azure/appcenter, mybatis, postgresql) and surefire config; default -Dsuite=helloWorld"],
+            ["Jenkinsfile", "placeholder (println only)"],
+            [".github/workflows/sonarqube.yml", "SonarQube scan template; sonar.projectKey is still empty"]] },
+  { id: "suites", group: "build", area: "build", label: "TestNG suites",
+    desc: "27 suite XMLs (+ regression/). Pick one with mvn test -Dsuite=<name>.",
+    dir: TR + "testng_suites/", path: TR + "testng_suites/",
+    files: [["helloWorld.xml", "HelloWorld"], ["api.xml", "APISampleTest"], ["soap.xml", "SoapSampleTest"],
+            ["web.xml", "WebSampleTest"], ["web-single-driver.xml", "WebSampleSingleDriver"],
+            ["web-multiple-browser.xml", "WebMultipleBrowserTest"], ["web-open-strategy.xml", "PageOpeningStrategySampleTest"],
+            ["web-localization.xml", "WebLocalizationSample"], ["android.xml", "MobileSampleTest"], ["ios.xml", "MobileSampleTest"],
+            ["android-dragAndDrop.xml", "MobileDragAndDropTest"], ["ios-preferences.xml", "IOSPreferencesTest"],
+            ["ios-safari.xml", "IOSSafariTest"], ["dataprovider.xml", "DataProvidersSampleTest, CustomDataProvidersSampleTest"],
+            ["proxy.xml", "ProxySampleTest"], ["autodownload.xml", "AutoDownloadTest"], ["amazon.xml", "AmazonS3Test"],
+            ["regression/attachFile.xml", "regression.attachfile"], ["regression/dataprovider-retry.xml", "regression.dataprovider"],
+            ["regression/dataprovider-multiply-classes.xml", "regression.dataprovider"],
+            ["regression/xls-dataprovider-retry.xml", "regression.dataprovider"],
+            ["regression/esg-artifact.xml", "regression.esg"], ["regression/esg-clipboard.xml", "regression.esg"],
+            ["regression/esg-devtools.xml", "regression.esg"], ["regression/esg-localstorage.xml", "regression.esg"],
+            ["regression/esg-proxy.xml", "regression.esg"], ["regression/esg-vnc.xml", "regression.esg"]],
+    warn: "DBSampleTest and CryptoSampleTest are not in any suite." },
+
+  // ---------------------------------------------------------------- tests
+  { id: "t.web", group: "tests", area: "test", label: "Web UI tests",
+    desc: "GSMArena page-object tests (specs, compare, news, opening strategies, multi-browser).",
+    dir: T, path: T + "WebSampleTest.java",
+    files: [["WebSampleTest.java", "model specs, compare, news search, brand grouping"],
+            ["WebSampleSingleDriver.java", "dependsOnMethods chain sharing one driver"],
+            ["WebMultipleBrowserTest.java", "Chrome + Firefox drivers in one test"],
+            ["PageOpeningStrategySampleTest.java", "BY_ELEMENT / BY_URL / BY_URL_AND_ELEMENT"]] },
+  { id: "t.l10n", group: "tests", area: "test", label: "Web localization test",
+    desc: "Checks L10N resource bundles against Wikipedia locale pages.",
+    dir: T, path: T + "WebLocalizationSample.java",
+    files: [["WebLocalizationSample.java", "locale check, L10N.assertAll / getText"]] },
+  { id: "t.mobile", group: "tests", area: "test", label: "Mobile tests",
+    desc: "Appium tests: Carina demo app, Android drag & drop, iOS Settings, iOS Safari.",
+    dir: T, path: T + "MobileSampleTest.java",
+    files: [["MobileSampleTest.java", "login, WebView context switch, UI elements (Android + iOS)"],
+            ["MobileDragAndDropTest.java", "drag & drop in Appium ApiDemos"],
+            ["IOSPreferencesTest.java", "iOS Settings app"],
+            ["IOSSafariTest.java", "mobile Safari on saucelabs page"]] },
+  { id: "t.api", group: "tests", area: "test", label: "REST API test",
+    desc: "Create / get / delete users on jsonplaceholder with JSON templates + schema.",
+    dir: T, path: T + "APISampleTest.java",
+    files: [["APISampleTest.java", "POST (with poller), GET + schema validation, DELETE"]] },
+  { id: "t.soap", group: "tests", area: "test", label: "SOAP test",
+    desc: "AddInteger and LookupCity SOAP calls with XML templates.",
+    dir: T, path: T + "SoapSampleTest.java",
+    files: [["SoapSampleTest.java", "XmlPath check + strict XML compare"]] },
+  { id: "t.db", group: "tests", area: "test", label: "DB test",
+    desc: "MyBatis CRUD chain: create user, preference, update, delete.",
+    dir: T, path: T + "DBSampleTest.java",
+    files: [["DBSampleTest.java", "dependsOnMethods CRUD via UserMapper / UserPreferenceMapper"]],
+    warn: "Not referenced by any TestNG suite; needs a Postgres from _database.properties." },
+  { id: "t.dataprov", group: "tests", area: "test", label: "Data-provider tests",
+    desc: "TestNG @DataProvider/@Parameters and Carina XLS/CSV data sources.",
+    dir: T, path: T + "CustomDataProvidersSampleTest.java",
+    files: [["DataProvidersSampleTest.java", "TestNG DataProvider + suite @Parameters"],
+            ["CustomDataProvidersSampleTest.java", "@XlsDataSourceParameters / @CsvDataSourceParameters"]] },
+  { id: "t.infra", group: "tests", area: "test", label: "Infra / config tests",
+    desc: "Carina framework features: proxy modes, crypto, Amazon S3, auto-download.",
+    dir: T, path: T + "ProxySampleTest.java",
+    files: [["ProxySampleTest.java", "MANUAL / DIRECT / PAC / AUTODETECT / SYSTEM proxies"],
+            ["CryptoSampleTest.java", "{crypt:...} decryption of R.CONFIG / R.TESTDATA (no suite)"],
+            ["AmazonS3Test.java", "download APK from S3 into artifacts"],
+            ["AutoDownloadTest.java", "browser auto-download into session artifacts"]] },
+  { id: "t.hello", group: "tests", area: "test", label: "Hello World",
+    desc: "Minimal smoke test; default suite of mvn test.",
+    dir: T, path: T + "HelloWorld.java",
+    files: [["HelloWorld.java", "logs \"Hello World!\""]] },
+  { id: "r.attach", group: "tests", area: "test", label: "regression.attachfile",
+    desc: "File upload regression on the-internet.herokuapp.com.",
+    dir: T + "regression/attachfile/", path: T + "regression/attachfile/",
+    files: [["AttachFileTest.java", "upload icon.png and verify"]] },
+  { id: "r.dataprov", group: "tests", area: "test", label: "regression.dataprovider",
+    desc: "Random-failure data-provider tests that exercise Carina retry logic.",
+    dir: T + "regression/dataprovider/", path: T + "regression/dataprovider/",
+    files: [["DataproviderRetryTest.java", "static DataProvider DP1, ~50% failures"],
+            ["DataproviderRetryTest1.java", "reuses DP1 via dataProviderClass"],
+            ["DataproviderRetryTest2.java", "reuses DP1 via dataProviderClass"],
+            ["XlsDataproviderRetryTest.java", "XLS data source with random failures"]],
+    note: "Internal edge: DataproviderRetryTest1/2 → DataproviderRetryTest (dataProviderClass)." },
+  { id: "r.esg", group: "tests", area: "test", label: "regression.esg",
+    desc: "Zebrunner Selenium Grid features: artifacts, clipboard, DevTools, localStorage, proxy, VNC.",
+    dir: T + "regression/esg/", path: T + "regression/esg/",
+    files: [["ArtifactTest.java", "grid session artifacts (video, logs, har)"],
+            ["ClipboardTest.java", "grid clipboard HTTP endpoint"],
+            ["DevToolsTest.java", "Chrome DevTools sessions"],
+            ["LocalStorageTest.java", "localStorage via JS and Augmenter"],
+            ["ProxyTest.java", "Zebrunner MITM proxy rewrites response"],
+            ["VNCTest.java", "VNC websocket messages"]] },
+
+  // ---------------------------------------------------------------- main: web GUI
+  { id: "gui.pages.common", group: "main", area: "web", label: "gui.pages.common",
+    desc: "Abstract GSMArena page contracts (*PageBase). Concrete class chosen at runtime by @DeviceType.",
+    dir: M + "gui/pages/common/", path: M + "gui/pages/common/",
+    files: [["HomePageBase.java", "home page: brands, footer, compare, all brands"],
+            ["AllBrandsPageBase.java", "selectBrand → BrandModelsPageBase"],
+            ["BrandModelsPageBase.java", "selectModel, getModels → ModelItem"],
+            ["ModelInfoPageBase.java", "read display / camera / ram / battery"],
+            ["CompareModelsPageBase.java", "compareModels → ModelSpecs"],
+            ["NewsPageBase.java", "searchNews → NewsItem"]],
+    note: "Package cycles: ↔ gui.components (BrandModelsPageBase → ModelItem → ModelInfoPageBase) and ↔ gui.components.footer (HomePageBase ↔ FooterMenuBase)." },
+  { id: "gui.pages.desktop", group: "main", area: "web", label: "gui.pages.desktop",
+    desc: "Desktop implementations of the GSMArena pages, plus Wikipedia (L10N) and file-upload pages.",
+    dir: M + "gui/pages/desktop/", path: M + "gui/pages/desktop/",
+    files: [["HomePage.java", "@DeviceType(DESKTOP) HomePageBase, uses FooterMenu"],
+            ["AllBrandsPage.java", ""], ["BrandModelsPage.java", ""], ["ModelInfoPage.java", ""],
+            ["CompareModelsPage.java", "uses CandidateBlock, builds ModelSpecs"], ["NewsPage.java", ""],
+            ["AttachFilePage.java", "standalone: the-internet upload page"],
+            ["WikipediaHomePage.java", "standalone: wikipedia.org"],
+            ["WikipediaLocalePage.java", "standalone: @Localized {L10N:...} locators"]],
+    note: "Cycle: ↔ gui.components.footer (FooterMenu instantiates desktop pages directly with new)." },
+  { id: "gui.pages.android", group: "main", area: "web", label: "gui.pages.android",
+    desc: "GSMArena mobile-web pages for Android phone browsers (@DeviceType ANDROID_PHONE).",
+    dir: M + "gui/pages/android/", path: M + "gui/pages/android/",
+    files: [["HomePage.java", "uses MobileFooterMenu"], ["AllBrandsPage.java", ""], ["BrandModelsPage.java", ""],
+            ["ModelInfoPage.java", ""], ["CompareModelsPage.java", ""], ["NewsPage.java", ""]] },
+  { id: "gui.pages.ios", group: "main", area: "web", label: "gui.pages.ios",
+    desc: "GSMArena mobile-web pages for iOS phone browsers (@DeviceType IOS_PHONE).",
+    dir: M + "gui/pages/ios/", path: M + "gui/pages/ios/",
+    files: [["HomePage.java", "uses MobileFooterMenu"], ["AllBrandsPage.java", ""], ["BrandModelsPage.java", ""],
+            ["ModelInfoPage.java", ""], ["CompareModelsPage.java", ""], ["NewsPage.java", ""]] },
+  { id: "gui.components", group: "main", area: "web", label: "gui.components",
+    desc: "Reusable UI blocks: phone-model tile, news item, cookie pop-up.",
+    dir: M + "gui/components/", path: M + "gui/components/",
+    files: [["ModelItem.java", "model tile; openModelPage → ModelInfoPageBase"],
+            ["NewsItem.java", "news search result"],
+            ["WeValuePrivacyAd.java", "cookie consent pop-up (unused)"]] },
+  { id: "gui.components.compare", group: "main", area: "web", label: "gui.components.compare",
+    desc: "Compare-page input block and the ModelSpecs value object.",
+    dir: M + "gui/components/compare/", path: M + "gui/components/compare/",
+    files: [["CandidateBlock.java", "search input + autocomplete pick"],
+            ["ModelSpecs.java", "SpecType → value map"]] },
+  { id: "gui.components.footer", group: "main", area: "web", label: "gui.components.footer",
+    desc: "Footer navigation: abstract base, desktop and mobile variants.",
+    dir: M + "gui/components/footer/", path: M + "gui/components/footer/",
+    files: [["FooterMenuBase.java", "abstract: openNewsPage / openHomePage"],
+            ["FooterMenu.java", "desktop: new HomePage / NewsPage / CompareModelsPage"],
+            ["MobileFooterMenu.java", "mobile: initPage(...Base.class)"]] },
+
+  // ---------------------------------------------------------------- main: native mobile
+  { id: "mobile.gui.pages.common", group: "main", area: "mobile", label: "mobile.gui.pages.common",
+    desc: "Abstract pages of the Carina native demo app: Welcome → Login → Description → WebView / UI elements / …",
+    dir: M + "mobile/gui/pages/common/", path: M + "mobile/gui/pages/common/",
+    files: [["WelcomePageBase.java", ""], ["LoginPageBase.java", ""], ["CarinaDescriptionPageBase.java", ""],
+            ["WebViewPageBase.java", ""], ["ContactUsPageBase.java", ""], ["UIElementsPageBase.java", ""],
+            ["ChartsPageBase.java", "empty"], ["MapsPageBase.java", "empty"]] },
+  { id: "mobile.gui.pages.android", group: "main", area: "mobile", label: "mobile.gui.pages.android",
+    desc: "Android native implementations + standalone DragAndDropPage (ApiDemos).",
+    dir: M + "mobile/gui/pages/android/", path: M + "mobile/gui/pages/android/",
+    files: [["WelcomePage.java", ""], ["LoginPage.java", ""], ["CarinaDescriptionPage.java", ""],
+            ["WebViewPage.java", ""], ["ContactUsPage.java", ""], ["UIElementsPage.java", ""],
+            ["ChartsPage.java", ""], ["MapsPage.java", ""], ["DragAndDropPage.java", "standalone"]] },
+  { id: "mobile.gui.pages.ios", group: "main", area: "mobile", label: "mobile.gui.pages.ios",
+    desc: "iOS native implementations (Welcome, Login, Description) + Settings and Safari pages.",
+    dir: M + "mobile/gui/pages/ios/", path: M + "mobile/gui/pages/ios/",
+    files: [["WelcomePage.java", ""], ["LoginPage.java", ""],
+            ["CarinaDescriptionPage.java", "navigateTo* throw UnsupportedOperationException"],
+            ["PreferencesPage.java", "standalone: iOS Settings"], ["SaucePage.java", "standalone: saucelabs web page"]] },
+
+  // ---------------------------------------------------------------- main: API / SOAP
+  { id: "api", group: "main", area: "api", label: "api",
+    desc: "REST method definitions (AbstractApiMethodV2) for /users on jsonplaceholder.",
+    dir: M + "api/", path: M + "api/",
+    files: [["GetUserMethods.java", "GET /users"], ["PostUserMethod.java", "POST /users"], ["DeleteUserMethod.java", "DELETE /users/1"]] },
+  { id: "soap", group: "main", area: "api", label: "soap",
+    desc: "SOAP method definitions for the crcind.com SOAP.Demo service.",
+    dir: M + "soap/", path: M + "soap/",
+    files: [["AddIntegerMethod.java", "AddInteger"], ["LookupCityMethod.java", "LookupCity"]] },
+
+  // ---------------------------------------------------------------- main: DB / infra
+  { id: "db.mappers", group: "main", area: "db", label: "db.mappers",
+    desc: "MyBatis mapper interfaces; SQL lives in mappers/*.xml.",
+    dir: M + "db/mappers/", path: M + "db/mappers/",
+    files: [["UserMapper.java", "create / find / update / delete"], ["UserPreferenceMapper.java", "create / findById"]] },
+  { id: "db.models", group: "main", area: "db", label: "db.models",
+    desc: "POJOs for carina.USERS and carina.USER_PREFERENCES.",
+    dir: M + "db/models/", path: M + "db/models/",
+    files: [["User.java", ""], ["UserPreference.java", ""]] },
+  { id: "utils", group: "main", area: "infra", label: "utils",
+    desc: "MyBatis session factory, grid artifact polling, mobile context switching.",
+    dir: M + "utils/", path: M + "utils/",
+    files: [["ConnectionFactory.java", "SqlSessionFactory from mybatis-config.xml"],
+            ["ArtifactUtils.java", "wait for session artifact"],
+            ["MobileContextUtils.java", "NATIVE / WEBVIEW context switch"]] },
+  { id: "websocket", group: "main", area: "infra", label: "websocket",
+    desc: "Clients for Zebrunner grid VNC websocket and clipboard HTTP endpoints.",
+    dir: M + "websocket/", path: M + "websocket/",
+    files: [["WebsocketClientEndpoint.java", "JSR-356 client endpoint"],
+            ["EndpointUtils.java", "builds wss/http URLs + auth from selenium_url"]] },
+
+  // ---------------------------------------------------------------- resources
+  { id: "res.config", group: "resources", area: "res", label: "Core config",
+    desc: "_config.properties (urls, env, timeouts, proxy, crypto), test data, email, Zebrunner agent.",
+    dir: MR, path: MR + "_config.properties",
+    files: [["_config.properties", "url, DEMO.api_url, DEMO.soap_url, locale, proxy_*, selenium_url, …"],
+            ["_testdata.properties", "encrypted test_credentials"],
+            ["_email.properties", "SMTP for reports"],
+            ["agent.properties", "Zebrunner reporting agent"]] },
+  { id: "res.mybatis", group: "resources", area: "res", label: "MyBatis config",
+    desc: "mybatis-config.xml + _database.properties (Postgres connection).",
+    dir: MR, path: MR + "mybatis-config.xml",
+    files: [["mybatis-config.xml", "POOLED datasource, registers mapper XMLs"], ["_database.properties", "db.url / user / pass"]] },
+  { id: "res.mappers", group: "resources", area: "res", label: "MyBatis XML mappers",
+    desc: "SQL statements and resultMaps bound to db.mappers interfaces.",
+    dir: MR + "mappers/", path: MR + "mappers/",
+    files: [["UserMapper.xml", ""], ["UserPreferenceMapper.xml", ""]] },
+  { id: "res.l10n", group: "resources", area: "res", label: "L10N bundles",
+    desc: "locale_*.properties for 7 locales (WikipediaLocalePage keys).",
+    dir: MR + "L10N/", path: MR + "L10N/",
+    files: [["locale.properties", ""], ["locale_en_US.properties", ""], ["locale_de_DE.properties", ""],
+            ["locale_es_ES.properties", ""], ["locale_hu_HU.properties", ""], ["locale_ja_JP.properties", ""],
+            ["locale_ru_RU.properties", ""], ["locale_zh_CN.properties", ""]] },
+  { id: "res.browserstack", group: "resources", area: "res", label: "BrowserStack capabilities",
+    desc: "Per-device capability files (iPhone 12, Big Sur, Nexus 6, Win10 Edge).",
+    dir: MR + "browserstack/", path: MR + "browserstack/",
+    files: [["ios/iPhone_12.properties", ""], ["osx/big_sur.properties", ""],
+            ["android/Google_Nexus_6.properties", ""], ["win/win_10_Edge.properties", ""]],
+    warn: "Unreferenced: no code, suite or pom entry points here." },
+  { id: "res.apiTpl", group: "resources", area: "res", label: "REST templates",
+    desc: "FreeMarker JSON request/response templates, schema and properties for /users.",
+    dir: TR + "api/users/", path: TR + "api/users/",
+    files: [["_get/rs.json", ""], ["_get/rs.schema", "used by APISampleTest"], ["_post/rq.json", ""], ["_post/rs.json", ""],
+            ["_delete/rq.json", ""], ["_delete/rs.json", ""], ["user.properties", ""]] },
+  { id: "res.soapTpl", group: "resources", area: "res", label: "SOAP templates",
+    desc: "SOAP envelope request/response templates and soap.properties.",
+    dir: TR + "api/soap/", path: TR + "api/soap/",
+    files: [["addinteger/rq.xml", ""], ["addinteger/rs.xml", ""], ["lookupcity/rq.xml", ""],
+            ["lookupcity/rs.xml", ""], ["soap.properties", ""]] },
+  { id: "res.data", group: "resources", area: "res", label: "Data sources",
+    desc: "demo.xlsx and CSV files for data-driven tests.",
+    dir: TR + "data_source/", path: TR + "data_source/",
+    files: [["demo.xlsx", ""], ["calculator.csv", ""], ["finances.csv", ""], ["financesPrevYear.csv", "only referenced from dataprovider.xml"]] },
+  { id: "res.files", group: "resources", area: "res", label: "Upload fixture",
+    desc: "files/icon.png used by the attach-file regression.",
+    dir: TR + "files/", path: TR + "files/",
+    files: [["icon.png", ""]] },
+  { id: "res.features", group: "resources", area: "res", label: "Cucumber feature",
+    desc: "GSMArenaNews.feature scenario.",
+    dir: TR + "features/", path: TR + "features/",
+    files: [["GSMArenaNews.feature", ""]],
+    warn: "Orphan: there is no Cucumber runner, step definitions or dependency." },
+];
+
+// kind: calls (compile-time use), runtime (@DeviceType resolution via initPage),
+//       reads (configuration / template / data file), launches (build → suite → test)
+const edges = [
+  // build
+  { source: "maven", target: "suites", kind: "launches", note: "surefire suiteXmlFile = testng_suites/${suite}.xml" },
+  { source: "suites", target: "t.hello", kind: "launches", note: "helloWorld.xml" },
+  { source: "suites", target: "t.web", kind: "launches", note: "web, web-single-driver, web-multiple-browser, web-open-strategy" },
+  { source: "suites", target: "t.l10n", kind: "launches", note: "web-localization.xml" },
+  { source: "suites", target: "t.mobile", kind: "launches", note: "android, ios, android-dragAndDrop, ios-preferences, ios-safari" },
+  { source: "suites", target: "t.api", kind: "launches", note: "api.xml" },
+  { source: "suites", target: "t.soap", kind: "launches", note: "soap.xml" },
+  { source: "suites", target: "t.dataprov", kind: "launches", note: "dataprovider.xml" },
+  { source: "suites", target: "t.infra", kind: "launches", note: "proxy, autodownload, amazon (CryptoSampleTest has no suite)" },
+  { source: "suites", target: "r.attach", kind: "launches", note: "regression/attachFile.xml" },
+  { source: "suites", target: "r.dataprov", kind: "launches", note: "regression/dataprovider-retry, dataprovider-multiply-classes, xls-dataprovider-retry" },
+  { source: "suites", target: "r.esg", kind: "launches", note: "regression/esg-*.xml (6 suites)" },
+  { source: "suites", target: "res.data", kind: "reads", note: "dataprovider.xml passes data_source/financesPrevYear.csv" },
+
+  // tests → main
+  { source: "t.web", target: "gui.pages.common", kind: "calls", note: "WebSampleTest → HomePageBase, CompareModelsPageBase, …" },
+  { source: "t.web", target: "gui.components", kind: "calls", note: "WebSampleTest → ModelItem, NewsItem" },
+  { source: "t.web", target: "gui.components.compare", kind: "calls", note: "WebSampleTest → ModelSpecs" },
+  { source: "t.web", target: "gui.components.footer", kind: "calls", note: "WebSampleSingleDriver → FooterMenuBase" },
+  { source: "t.l10n", target: "gui.pages.desktop", kind: "calls", note: "WebLocalizationSample → WikipediaHomePage, WikipediaLocalePage" },
+  { source: "t.mobile", target: "mobile.gui.pages.common", kind: "calls", note: "MobileSampleTest → WelcomePageBase, LoginPageBase, …" },
+  { source: "t.mobile", target: "mobile.gui.pages.android", kind: "calls", note: "MobileDragAndDropTest → DragAndDropPage" },
+  { source: "t.mobile", target: "mobile.gui.pages.ios", kind: "calls", note: "IOSPreferencesTest → PreferencesPage; IOSSafariTest → SaucePage" },
+  { source: "t.mobile", target: "utils", kind: "calls", note: "MobileSampleTest, IOSPreferencesTest → MobileContextUtils" },
+  { source: "t.api", target: "api", kind: "calls", note: "APISampleTest → PostUserMethod, GetUserMethods, DeleteUserMethod" },
+  { source: "t.soap", target: "soap", kind: "calls", note: "SoapSampleTest → AddIntegerMethod, LookupCityMethod" },
+  { source: "t.db", target: "db.mappers", kind: "calls", note: "DBSampleTest → UserMapper, UserPreferenceMapper" },
+  { source: "t.db", target: "db.models", kind: "calls", note: "DBSampleTest → User, UserPreference" },
+  { source: "t.db", target: "utils", kind: "calls", note: "DBSampleTest → ConnectionFactory" },
+  { source: "t.infra", target: "gui.pages.desktop", kind: "calls", note: "ProxySampleTest → HomePage, NewsPage" },
+  { source: "t.infra", target: "utils", kind: "calls", note: "AutoDownloadTest → ArtifactUtils" },
+  { source: "r.attach", target: "gui.pages.desktop", kind: "calls", note: "AttachFileTest → AttachFilePage" },
+  { source: "r.esg", target: "gui.pages.common", kind: "calls", note: "Artifact/Clipboard/DevTools/LocalStorage/VNC tests → HomePageBase" },
+  { source: "r.esg", target: "gui.pages.desktop", kind: "calls", note: "ProxyTest → HomePage" },
+  { source: "r.esg", target: "utils", kind: "calls", note: "ArtifactTest → ArtifactUtils" },
+  { source: "r.esg", target: "websocket", kind: "calls", note: "VNCTest → WebsocketClientEndpoint, EndpointUtils; ClipboardTest → EndpointUtils" },
+
+  // main → main (web GUI)
+  { source: "gui.pages.desktop", target: "gui.pages.common", kind: "calls", note: "HomePage extends HomePageBase; initPage(AllBrandsPageBase)" },
+  { source: "gui.pages.desktop", target: "gui.components", kind: "calls", note: "BrandModelsPage → ModelItem; NewsPage → NewsItem" },
+  { source: "gui.pages.desktop", target: "gui.components.compare", kind: "calls", note: "CompareModelsPage → CandidateBlock, ModelSpecs" },
+  { source: "gui.pages.desktop", target: "gui.components.footer", kind: "calls", note: "HomePage → FooterMenu" },
+  { source: "gui.pages.android", target: "gui.pages.common", kind: "calls", note: "HomePage extends HomePageBase" },
+  { source: "gui.pages.android", target: "gui.components", kind: "calls", note: "BrandModelsPage → ModelItem; NewsPage → NewsItem" },
+  { source: "gui.pages.android", target: "gui.components.compare", kind: "calls", note: "CompareModelsPage → CandidateBlock, ModelSpecs" },
+  { source: "gui.pages.android", target: "gui.components.footer", kind: "calls", note: "HomePage → MobileFooterMenu" },
+  { source: "gui.pages.ios", target: "gui.pages.common", kind: "calls", note: "HomePage extends HomePageBase" },
+  { source: "gui.pages.ios", target: "gui.components", kind: "calls", note: "BrandModelsPage → ModelItem; NewsPage → NewsItem" },
+  { source: "gui.pages.ios", target: "gui.components.compare", kind: "calls", note: "CompareModelsPage → CandidateBlock, ModelSpecs" },
+  { source: "gui.pages.ios", target: "gui.components.footer", kind: "calls", note: "HomePage → MobileFooterMenu" },
+  { source: "gui.pages.common", target: "gui.components", kind: "calls", note: "BrandModelsPageBase → ModelItem; NewsPageBase → NewsItem" },
+  { source: "gui.pages.common", target: "gui.components.compare", kind: "calls", note: "CompareModelsPageBase → ModelSpecs" },
+  { source: "gui.pages.common", target: "gui.components.footer", kind: "calls", note: "HomePageBase → FooterMenuBase" },
+  { source: "gui.components", target: "gui.pages.common", kind: "calls", note: "ModelItem.openModelPage → ModelInfoPageBase (cycle)" },
+  { source: "gui.components.footer", target: "gui.pages.common", kind: "calls", note: "FooterMenuBase / MobileFooterMenu → HomePageBase, NewsPageBase (cycle)" },
+  { source: "gui.components.footer", target: "gui.pages.desktop", kind: "calls", note: "FooterMenu → new HomePage / NewsPage / CompareModelsPage (cycle)" },
+
+  // runtime @DeviceType resolution
+  { source: "gui.pages.common", target: "gui.pages.desktop", kind: "runtime", note: "initPage(…Base.class) resolves DESKTOP implementation" },
+  { source: "gui.pages.common", target: "gui.pages.android", kind: "runtime", note: "initPage(…Base.class) resolves ANDROID_PHONE implementation" },
+  { source: "gui.pages.common", target: "gui.pages.ios", kind: "runtime", note: "initPage(…Base.class) resolves IOS_PHONE implementation" },
+  { source: "mobile.gui.pages.common", target: "mobile.gui.pages.android", kind: "runtime", note: "initPage(…Base.class) resolves ANDROID_PHONE implementation" },
+  { source: "mobile.gui.pages.common", target: "mobile.gui.pages.ios", kind: "runtime", note: "initPage(…Base.class) resolves IOS_PHONE implementation" },
+
+  // main → main (mobile / db)
+  { source: "mobile.gui.pages.android", target: "mobile.gui.pages.common", kind: "calls", note: "LoginPage extends LoginPageBase; initPage(CarinaDescriptionPageBase)" },
+  { source: "mobile.gui.pages.ios", target: "mobile.gui.pages.common", kind: "calls", note: "CarinaDescriptionPage extends CarinaDescriptionPageBase" },
+  { source: "db.mappers", target: "db.models", kind: "calls", note: "UserMapper → User; UserPreferenceMapper → UserPreference" },
+  { source: "utils", target: "db.mappers", kind: "calls", note: "ConnectionFactory → UserMapper, UserPreferenceMapper" },
+
+  // reads (resources)
+  { source: "api", target: "res.apiTpl", kind: "reads", note: "@RequestTemplatePath / @ResponseTemplatePath, user.properties" },
+  { source: "api", target: "res.config", kind: "reads", note: "api_url" },
+  { source: "soap", target: "res.soapTpl", kind: "reads", note: "@RequestTemplatePath / @ResponseTemplatePath" },
+  { source: "soap", target: "res.config", kind: "reads", note: "soap_url" },
+  { source: "websocket", target: "res.config", kind: "reads", note: "selenium_url" },
+  { source: "utils", target: "res.mybatis", kind: "reads", note: "ConnectionFactory → Resources.getResourceAsReader(\"mybatis-config.xml\")" },
+  { source: "res.mybatis", target: "res.mappers", kind: "reads", note: "<mappers> registers UserMapper.xml, UserPreferenceMapper.xml" },
+  { source: "res.mappers", target: "db.mappers", kind: "reads", note: "XML namespace binds to mapper interfaces" },
+  { source: "res.mappers", target: "db.models", kind: "reads", note: "resultMap types" },
+  { source: "gui.pages.desktop", target: "res.l10n", kind: "reads", note: "WikipediaLocalePage {L10N:...} locators" },
+  { source: "t.l10n", target: "res.l10n", kind: "reads", note: "L10N.getText / assertAll" },
+  { source: "t.api", target: "res.apiTpl", kind: "reads", note: "user.properties, _get/rs.schema" },
+  { source: "t.soap", target: "res.soapTpl", kind: "reads", note: "soap.properties" },
+  { source: "t.web", target: "res.config", kind: "reads", note: "url (gsmarena)" },
+  { source: "t.mobile", target: "res.config", kind: "reads", note: "capabilities via R.CONFIG" },
+  { source: "t.infra", target: "res.config", kind: "reads", note: "proxy_*, crypto, auto_download, _testdata.properties" },
+  { source: "r.esg", target: "res.config", kind: "reads", note: "selenium_url, proxy_type" },
+  { source: "t.dataprov", target: "res.data", kind: "reads", note: "demo.xlsx, calculator.csv, finances.csv" },
+  { source: "r.dataprov", target: "res.data", kind: "reads", note: "demo.xlsx (sheet \"Data\")" },
+  { source: "r.attach", target: "res.files", kind: "reads", note: "files/icon.png" },
+];
+
+/* ============================================================================
+ * RENDERING
+ * ==========================================================================*/
+const nodeById = Object.fromEntries(nodes.map(n => [n.id, n]));
+const link = p => REPO_BASE + "/" + p;
+const esc = s => String(s).replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+
+function nodeHeight(n) {
+  const descLines = Math.ceil(n.desc.length / 36);
+  return 30 + 15 * descLines;
+}
+
+const elements = [
+  ...Object.entries(GROUPS).map(([id, g]) => ({ data: { id: "group:" + id, label: g.label, isGroup: true, color: g.color } })),
+  ...nodes.map(n => ({
+    data: {
+      id: n.id, parent: "group:" + n.group, group: n.group,
+      label: n.label + "\n" + n.desc,
+      color: GROUPS[n.group].color, fill: AREA_COLORS[n.area],
+      h: nodeHeight(n), warn: !!n.warn,
+    },
+  })),
+  ...edges.map((e, i) => ({ data: { id: "e" + i, source: e.source, target: e.target, kind: e.kind, note: e.note } })),
+];
+
+if (typeof cytoscapeDagre !== "undefined" && cytoscape.use) {
+  try { cytoscape.use(cytoscapeDagre); } catch (_) { /* already registered */ }
+}
+
+const cy = cytoscape({
+  container: document.getElementById("cy"),
+  elements,
+  layout: { name: "preset" },  // real layout (dagre) runs in runLayout()
+  wheelSensitivity: 0.2,
+  style: [
+    { selector: "node", style: {
+        shape: "round-rectangle", width: 250, height: "data(h)",
+        "background-color": "data(fill)", "border-color": "data(color)", "border-width": 2,
+        label: "data(label)", "text-wrap": "wrap", "text-max-width": 234,
+        "text-valign": "center", "text-halign": "center", "font-size": 11, color: "#1f2328",
+        "line-height": 1.3 } },
+    { selector: "node[?warn]", style: { "border-style": "dashed" } },
+    { selector: "node[?isGroup]", style: {
+        shape: "round-rectangle", "background-color": "data(color)", "background-opacity": 0.04,
+        "border-color": "data(color)", "border-width": 1, "border-style": "solid",
+        label: "data(label)", "text-valign": "top", "text-halign": "center", "font-size": 16,
+        "font-weight": "bold", color: "data(color)", padding: 18 } },
+    { selector: "edge", style: {
+        width: 1.6, "curve-style": "bezier", "target-arrow-shape": "triangle",
+        "line-color": "#57606a", "target-arrow-color": "#57606a", "arrow-scale": 1 } },
+    { selector: "edge[kind = 'runtime']", style: { "line-style": "dashed", "line-color": "#0969da", "target-arrow-color": "#0969da" } },
+    { selector: "edge[kind = 'reads']", style: { "line-style": "dotted", "line-color": "#8c959f", "target-arrow-color": "#8c959f", width: 1.4 } },
+    { selector: "edge[kind = 'launches']", style: { "line-color": "#8250df", "target-arrow-color": "#8250df", width: 1 } },
+    { selector: ".faded", style: { opacity: 0.12 } },
+    { selector: "node.focus", style: { "border-width": 4 } },
+    { selector: "edge.hl", style: { width: 3 } },
+    { selector: "node.match", style: { "border-width": 4, "border-color": "#bf8700" } },
+  ],
+});
+
+function runLayout() {
+  cy.layout({ name: "dagre", rankDir: "LR", nodeSep: 18, rankSep: 90, edgeSep: 8, fit: true, padding: 30,
+              filter: () => true }).run();
+}
+runLayout();
+
+// ---------------------------------------------------------------- side panel
+const panel = document.getElementById("panel");
+
+function showIntro() {
+  panel.innerHTML = `
+    <h2>Carina Demo – module graph</h2>
+    <p class="muted">Each box is a module; an arrow <b>A → B</b> means A calls / uses B.</p>
+    <ul>
+      <li><b>Main code</b>: one box per leaf Java package in <code>src/main/java</code>.</li>
+      <li><b>Test code</b>: top-level test classes grouped by feature; regression sub-packages as-is.</li>
+      <li><b>Resources</b>: groups of config / template / data files.</li>
+      <li><b>Build</b>: Maven and the TestNG suites that launch tests.</li>
+    </ul>
+    <h3>Edge kinds</h3>
+    <ul>
+      <li><b>calls</b> (solid): compile-time import / extends / instantiates.</li>
+      <li><b>runtime</b> (dashed blue): Carina <code>@DeviceType</code> picks the platform class behind <code>initPage(…Base.class)</code>.</li>
+      <li><b>reads</b> (dotted): loads a config / template / data file.</li>
+      <li><b>launches</b> (purple): build → suite → test.</li>
+    </ul>
+    <p class="muted">Click a box for details and a link to the code; double-click opens the code directly. Dashed borders mark modules with a caveat.</p>`;
+}
+
+function edgeList(list, dir) {
+  if (!list.length) return `<p class="muted">none</p>`;
+  return "<ul>" + list.map(e => {
+    const other = nodeById[dir === "out" ? e.target : e.source];
+    return `<li><a href="#" data-goto="${esc(other.id)}">${esc(other.label)}</a> <span class="muted">[${e.kind}]</span><br><span class="muted">${esc(e.note || "")}</span></li>`;
+  }).join("") + "</ul>";
+}
+
+function showNode(id) {
+  const n = nodeById[id];
+  if (!n) return;
+  const out = edges.filter(e => e.source === id);
+  const inc = edges.filter(e => e.target === id);
+  const g = GROUPS[n.group];
+  panel.innerHTML = `
+    <span class="tag" style="background:${g.color}">${esc(g.label)}</span>
+    <h2>${esc(n.label)}</h2>
+    <p>${esc(n.desc)}</p>
+    <a class="open" href="${esc(link(n.path))}" target="_blank" rel="noopener">Open code ↗</a>
+    <div class="muted" style="margin-top:4px"><code>${esc(n.path)}</code></div>
+    ${n.warn ? `<div class="warn">⚠ ${esc(n.warn)}</div>` : ""}
+    ${n.note ? `<div class="warn">ℹ ${esc(n.note)}</div>` : ""}
+    <h3>Files (${n.files.length})</h3>
+    <ul>${n.files.map(([f, d]) => `<li><a href="${esc(link(n.dir + f))}" target="_blank" rel="noopener">${esc(f)}</a>${d ? ` <span class="muted">– ${esc(d)}</span>` : ""}</li>`).join("")}</ul>
+    <h3>Uses → (${out.length})</h3>${edgeList(out, "out")}
+    <h3>Used by ← (${inc.length})</h3>${edgeList(inc, "in")}`;
+  panel.querySelectorAll("[data-goto]").forEach(a => a.addEventListener("click", ev => {
+    ev.preventDefault(); focusNode(a.dataset.goto, true);
+  }));
+}
+
+function clearFocus() {
+  cy.elements().removeClass("faded focus hl match");
+}
+
+function focusNode(id, center) {
+  clearFocus();
+  const node = cy.getElementById(id);
+  const hood = node.closedNeighborhood().union(node.ancestors()).union(node.closedNeighborhood().nodes().ancestors());
+  cy.elements().not(hood).addClass("faded");
+  node.addClass("focus");
+  node.connectedEdges().addClass("hl");
+  if (center) cy.animate({ center: { eles: node }, duration: 250 });
+  showNode(id);
+}
+
+cy.on("tap", "node", ev => {
+  if (ev.target.data("isGroup")) return;
+  focusNode(ev.target.id(), false);
+});
+cy.on("dbltap", "node", ev => {
+  const n = nodeById[ev.target.id()];
+  if (n) window.open(link(n.path), "_blank", "noopener");
+});
+cy.on("tap", ev => { if (ev.target === cy) { clearFocus(); showIntro(); } });
+
+// ---------------------------------------------------------------- controls
+document.getElementById("fit").onclick = () => cy.fit(undefined, 30);
+document.getElementById("reset").onclick = () => {
+  clearFocus(); showIntro(); document.getElementById("search").value = "";
+  document.querySelectorAll("header input[type=checkbox]").forEach(c => { c.checked = true; });
+  cy.elements().style("display", "element"); runLayout();
+};
+
+document.querySelectorAll("header input[data-kind]").forEach(cb => cb.addEventListener("change", () => {
+  cy.edges(`[kind = '${cb.dataset.kind}']`).style("display", cb.checked ? "element" : "none");
+}));
+document.getElementById("showResources").addEventListener("change", ev => {
+  const show = ev.target.checked;
+  cy.nodes("[group = 'resources'], #group\\:resources").style("display", show ? "element" : "none");
+  runLayout();
+});
+
+document.getElementById("search").addEventListener("input", ev => {
+  const q = ev.target.value.trim().toLowerCase();
+  cy.elements().removeClass("match faded");
+  if (!q) return;
+  const hits = nodes.filter(n => (n.label + " " + n.desc + " " + n.files.map(f => f[0]).join(" ")).toLowerCase().includes(q));
+  const ids = new Set(hits.map(n => n.id));
+  cy.nodes().forEach(el => {
+    if (el.data("isGroup")) return;
+    el.addClass(ids.has(el.id()) ? "match" : "faded");
+  });
+  cy.edges().addClass("faded");
+  if (hits.length === 1) focusNode(hits[0].id, true);
+});
+
+document.getElementById("legend").innerHTML =
+  Object.values(GROUPS).map(g => `<span><span class="sw" style="background:${g.color}"></span>${g.label}</span>`).join("") +
+  `<span><span class="ln"></span>calls</span>` +
+  `<span><span class="ln" style="border-top:2px dashed #0969da"></span>runtime</span>` +
+  `<span><span class="ln" style="border-top:2px dotted #8c959f"></span>reads</span>` +
+  `<span><span class="ln" style="border-color:#8250df"></span>launches</span>`;
+
+showIntro();
+</script>
+</body>
+</html>
