@@ -13,6 +13,7 @@ Feel free to support the development with a [**donation**](https://www.paypal.co
 * Download and start the latest [Selenium standalone server](http://www.seleniumhq.org/download/)
 * Download the latest version of [Eclipse](http://www.eclipse.org/downloads/) and install [TestNG plugin](http://testng.org/doc/download.html)
 * [Read Carina documentation](https://zebrunner.github.io/carina/)
+* Explore the module dependency graph: open [docs/architecture.html](docs/architecture.html) in a browser
 
 ### Import to Eclipse
 If generation is successfully complete, you would see a new project folder with a name equal to the artifactId attribute specified during generation, so navigate to that folder (where pom.xml is located) and execute the following Maven task:
