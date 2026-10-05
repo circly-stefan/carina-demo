@@ -17,6 +17,8 @@ package com.zebrunner.carina.demo.gui.pages.desktop;
 
 import java.lang.invoke.MethodHandles;
 
+import com.zebrunner.carina.demo.gui.components.FlashMessage;
+import com.zebrunner.carina.demo.gui.pages.common.SecureAreaPageBase;
 import com.zebrunner.carina.demo.gui.pages.common.WebLoginPageBase;
 import org.openqa.selenium.WebDriver;
 import org.openqa.selenium.support.FindBy;
@@ -41,7 +43,7 @@ public class WebLoginPage extends WebLoginPageBase {
     private ExtendedWebElement loginButton;
 
     @FindBy(id = "flash")
-    private ExtendedWebElement flashMessage;
+    private FlashMessage flashMessage;
 
     @FindBy(xpath = "//a[contains(text(), 'Logout')]")
     private ExtendedWebElement logoutLink;
@@ -52,31 +54,49 @@ public class WebLoginPage extends WebLoginPageBase {
     }
 
     @Override
-    public void typeUsername(String username) {
+    public WebLoginPage typeUsername(String username) {
         LOGGER.info("typing username: " + username);
         usernameInput.type(username);
+        return this;
     }
 
     @Override
-    public void typePassword(String password) {
+    public WebLoginPage typePassword(String password) {
         LOGGER.info("typing password");
         passwordInput.type(password);
+        return this;
     }
 
     @Override
-    public void clickLogin() {
+    public SecureAreaPageBase clickLogin() {
         LOGGER.info("clicking login button");
         loginButton.click();
+        return initPage(driver, SecureAreaPageBase.class);
     }
 
     @Override
-    public String getFlashMessage() {
-        return flashMessage.getText();
+    public FlashMessage getFlashMessage() {
+        return flashMessage;
     }
 
     @Override
     public boolean isLoggedIn() {
         return logoutLink.isPresent();
+    }
+
+    @Override
+    public boolean isUsernameFieldEmpty() {
+        return usernameInput.getAttribute("value").isEmpty();
+    }
+
+    @Override
+    public boolean isPasswordFieldEmpty() {
+        return passwordInput.getAttribute("value").isEmpty();
+    }
+
+    @Override
+    public boolean isLoginButtonEnabled() {
+        return loginButton.isEnabled();
     }
 
 }

@@ -17,6 +17,7 @@ package com.zebrunner.carina.demo.gui.pages.common;
 
 import org.openqa.selenium.WebDriver;
 
+import com.zebrunner.carina.demo.gui.components.FlashMessage;
 import com.zebrunner.carina.webdriver.decorator.ExtendedWebElement;
 import com.zebrunner.carina.webdriver.gui.AbstractPage;
 
@@ -26,20 +27,32 @@ public abstract class WebLoginPageBase extends AbstractPage {
         super(driver);
     }
 
-    public abstract void typeUsername(String username);
+    public abstract WebLoginPageBase typeUsername(String username);
 
-    public abstract void typePassword(String password);
+    public abstract WebLoginPageBase typePassword(String password);
 
-    public abstract void clickLogin();
+    public abstract SecureAreaPageBase clickLogin();
 
-    public abstract String getFlashMessage();
+    public abstract FlashMessage getFlashMessage();
 
     public abstract boolean isLoggedIn();
 
-    public void login(String username, String password) {
+    public abstract boolean isUsernameFieldEmpty();
+
+    public abstract boolean isPasswordFieldEmpty();
+
+    public abstract boolean isLoginButtonEnabled();
+
+    /**
+     * Fluent login method. Returns SecureAreaPageBase on successful login.
+     * WARNING: On failed login, the page stays on the login form. initPage will wait for the
+     * welcome-message UI marker and may time out. For negative-path tests, use typeUsername/typePassword
+     * and clickLogin separately, then assert on getFlashMessage() instead.
+     */
+    public SecureAreaPageBase login(String username, String password) {
         typeUsername(username);
         typePassword(password);
-        clickLogin();
+        return clickLogin();
     }
 
 }
